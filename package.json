@@ -1,0 +1,17 @@
+{
+  "name": "three_d_menu",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "prettier": "^3.9.10"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.74",
+    "typescript": "^7.0.2"
+  },
+  "private": true
+}
