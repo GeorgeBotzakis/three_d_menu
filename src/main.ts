@@ -1,7 +1,3 @@
-console.log('Happy developing ✨');
-
-// const device = await adapt
-
 async function start() {
   if (!navigator.gpu) {
     fail('WebGPU not supported.');
@@ -23,7 +19,6 @@ async function start() {
 
   // if we intentionally destroy the device, reason will be 'detroyed'
   device.lost.then((info) => {
-    console.error(`WebGPU device was lost: ${info.message}`);
     if (info.reason !== 'destroyed') {
       //try again
       start();
@@ -33,6 +28,7 @@ async function start() {
 }
 
 function main(device: GPUDevice) {
+  console.log('Happy developing ✨');
   const canvas = document.querySelector('canvas') as HTMLCanvasElement;
   const context = canvas.getContext('webgpu') as GPUCanvasContext;
 
@@ -46,41 +42,34 @@ function main(device: GPUDevice) {
     format: presentationFormat,
   });
 
-  const vsModule = device.createShaderModule({
-    label: 'our hardcoded rgb triangle shaders',
+  const module = device.createShaderModule({
+    label: 'triangle shaders with uniforms',
     code: /* wgsl */ `
-      struct OurVertexShaderOutput {
-        @builtin(position) position: vec4f
+      struct OurStruct {
+        color: vec4f,
+        offset: vec2f,
       };
+      struct OtherStruct {
+        scale: vec2f,
+      };
+      
+      @group(0) @binding(0) var<uniform> ourStruct: OurStruct;
+      @group(0) @binding(1) var<uniform> otherStruct: OtherStruct;
      
       @vertex fn vs(
         @builtin(vertex_index) vertexIndex : u32
-      ) -> OurVertexShaderOutput {
+      ) -> @builtin(position) vec4f {
         let pos = array(
           vec2f( 0.0,  0.5),  // top center
           vec2f(-0.5, -0.5),  // bottom left
           vec2f( 0.5, -0.5)   // bottom right
         );
         
-        
-        var vsOut: OurVertexShaderOutput;
-        vsOut.position =vec4f(pos[vertexIndex], 0.0, 1.0);
-        return vsOut;
+        return vec4f(pos[vertexIndex] * otherStruct.scale + ourStruct.offset, 0.0, 1.0);
       }
-    `,
-  });
-
-  const fsModule = device.createShaderModule({
-    label: 'checkerboard',
-    code: /* wgsl */ `
-     @fragment fn fs(@builtin(position) pixelPosition: vec4f) -> @location(0) vec4f {
-        let red = vec4f(1,0,0,1);
-        let cyan = vec4f(0,1,1,1);
-        
-        let grid = vec2u(pixelPosition.xy) / 32;
-        let checker = (grid.x + grid.y) % 2 == 1;
-        
-        return select(red, cyan, checker);
+      
+       @fragment fn fs() -> @location(0) vec4f {
+        return ourStruct.color;
       }
     `,
   });
@@ -88,10 +77,10 @@ function main(device: GPUDevice) {
   const pipeline = device.createRenderPipeline({
     layout: 'auto',
     vertex: {
-      module: vsModule,
+      module: module,
     },
     fragment: {
-      module: fsModule,
+      module: module,
       targets: [
         {
           format: presentationFormat,
@@ -102,6 +91,67 @@ function main(device: GPUDevice) {
       topology: 'triangle-list',
     },
   });
+
+  // Memory layout stuff
+  const staticUniformBufferSize = 4 * 4 + 2 * 4 + 2 * 4; // color, scale, padding
+  const uniformBufferSize = 2 * 4; // scale
+
+  const uniformBuffer = device.createBuffer({
+    size: staticUniformBufferSize,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  const kColorOffset = 0;
+  const kOffsetOffset = 4;
+
+  const kScaleffset = 0;
+
+  const kNumbObjects = 100;
+  const objectInfos: Array<{
+    scale: number;
+    uniformBuffer: GPUBuffer;
+    uniformValues: Float32Array<ArrayBuffer>;
+    bindGroup: GPUBindGroup;
+  }> = [];
+  for (let i = 0; i < kNumbObjects; i++) {
+    const staticUniformBuffer = device.createBuffer({
+      label: `static uniforms for obj: ${i}`,
+      size: staticUniformBufferSize,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    {
+      // create a typedarray to hold the value for the uniforms in JS
+      const uniformValues = new Float32Array(staticUniformBufferSize / 4);
+      uniformValues.set([rand(), rand(), rand(), 1], kColorOffset);
+      uniformValues.set([rand(-0.9, 0.9), rand(-0.9, 0.9)], kOffsetOffset);
+
+      device.queue.writeBuffer(staticUniformBuffer, 0, uniformValues);
+    }
+
+    const uniformValues = new Float32Array(uniformBufferSize / 4);
+    const uniformBuffer = device.createBuffer({
+      label: `changing uniforms for obj: ${i}`,
+      size: uniformBufferSize,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const bindGroup = device.createBindGroup({
+      label: `bind group for obj: ${i}`,
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: staticUniformBuffer },
+        { binding: 1, resource: uniformBuffer },
+      ],
+    });
+
+    objectInfos.push({
+      scale: rand(0.2, 0.5),
+      uniformBuffer,
+      uniformValues,
+      bindGroup,
+    });
+  }
 
   let value = 1;
   let lasttime = 0;
@@ -131,9 +181,9 @@ function main(device: GPUDevice) {
   function render() {
     // Get the current texture from the canvas context and
     // set it as the texture to render to.
-    (
-      renderPassDescriptor.colorAttachments as GPURenderPassColorAttachment[]
-    )[0].view = context.getCurrentTexture().createView();
+    renderPassDescriptor.colorAttachments[0]!.view = context
+      .getCurrentTexture()
+      .createView();
 
     // make a command encoder to start encoding commands
     const encoder = device.createCommandEncoder({ label: 'our encoder' }); // make a render pass encoder to encode render specific commands
@@ -141,7 +191,21 @@ function main(device: GPUDevice) {
       renderPassDescriptor as GPURenderPassDescriptor,
     );
     pass.setPipeline(pipeline);
-    pass.draw(3); // call our vertex shader 3 times.
+
+    // set uniform values in our JS side F32 Array
+    const aspect = canvas.width / canvas.height;
+
+    for (const {
+      scale,
+      bindGroup,
+      uniformBuffer,
+      uniformValues,
+    } of objectInfos) {
+      uniformValues.set([scale / aspect, scale], kScaleffset);
+      device.queue.writeBuffer(uniformBuffer, 0, uniformValues);
+      pass.setBindGroup(0, bindGroup);
+      pass.draw(3); // call our vertex shader 3 times
+    }
     pass.end();
 
     const commandBuffer = encoder.finish();
@@ -254,5 +318,16 @@ async function computation(device: GPUDevice) {
 
   //...
 }
+
+const rand = (min?: number, max?: number) => {
+  if (min === undefined) {
+    min = 0;
+    max = 1;
+  } else if (max === undefined) {
+    max = min;
+    min = 0;
+  }
+  return min + Math.random() * (max - min);
+};
 
 start();
