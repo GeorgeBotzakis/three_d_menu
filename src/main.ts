@@ -179,17 +179,23 @@ function main(device: GPUDevice) {
   }
 
   // circle buffer
-  const { vertexData, numVertices } = createCircleVertices({
+  const { vertexData, indexData, numVertices } = createCircleVertices({
     radius: 0.5,
     innerRadius: 0.25,
   });
 
   const vertexBuffer = device.createBuffer({
-    label: 'vertex buffer vertices',
+    label: 'vertex buffer',
     size: vertexData.byteLength,
     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
   device.queue.writeBuffer(vertexBuffer, 0, vertexData);
+  const indexBuffer = device.createBuffer({
+    label: 'index buffer',
+    size: indexData.byteLength,
+    usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(indexBuffer, 0, indexData);
 
   // a typed array we can use to update the changingStorageBuffer
   const storageValues = new Float32Array(changingVertexBufferSize / 4);
@@ -223,6 +229,7 @@ function main(device: GPUDevice) {
     pass.setVertexBuffer(0, vertexBuffer);
     pass.setVertexBuffer(1, staticVertexBuffer);
     pass.setVertexBuffer(2, changingVertexBuffer);
+    pass.setIndexBuffer(indexBuffer, 'uint32');
 
     // set uniform values in our JS side F32 Array
     const aspect = canvas.width / canvas.height;
@@ -233,7 +240,7 @@ function main(device: GPUDevice) {
     });
     device.queue.writeBuffer(changingVertexBuffer, 0, storageValues);
 
-    pass.draw(numVertices, kNumbObjects); // call our vertex shader 3 times for each instance
+    pass.drawIndexed(numVertices, kNumbObjects);
     pass.end();
 
     const commandBuffer = encoder.finish();
@@ -366,8 +373,8 @@ function createCircleVertices({
   startAngle = 0,
   endAngle = Math.PI * 2,
 } = {}) {
-  // 2 triangles per subdivision, 3 verts per tri
-  const numVertices = numSubdivisions * 3 * 2;
+  // 2 triangles at each subdivision, + 1 to wrap around the circle
+  const numVertices = (numSubdivisions + 1) * 2;
 
   // 2 32-bit (4byte) values and 1 32-bit value for color (rgb_)
   // The 32-bit color value will be written/read as 4 8-bit values
@@ -388,41 +395,50 @@ function createCircleVertices({
     colorData[colorOffset++] = b * 255;
     colorOffset += 9; // skip extra byte and the position
   };
+
+  // press on with index buffers
+
   // 2 triangles per subdivision
   //
-  // 0--1 4
-  // | / /|
-  // |/ / |
-  // 2 3--5
+  // 0 2 4 6 8 ...
+  //
+  // 1 3 5 7 9 ...
 
   const innerColor = [1, 1, 1];
   const outerColor = [0.1, 0.1, 0.1];
 
-  for (let i = 0; i < numSubdivisions; i++) {
+  for (let i = 0; i <= numSubdivisions; i++) {
     const angle1 =
       startAngle + ((i + 0) * (endAngle - startAngle)) / numSubdivisions;
-    const angle2 =
-      startAngle + ((i + 1) * (endAngle - startAngle)) / numSubdivisions;
 
     const c1 = Math.cos(angle1);
     const s1 = Math.sin(angle1);
-    const c2 = Math.cos(angle2);
-    const s2 = Math.sin(angle2);
 
     // first triangle
     addVertex(c1 * radius, s1 * radius, ...outerColor);
-    addVertex(c2 * radius, s2 * radius, ...outerColor);
     addVertex(c1 * innerRadius, s1 * innerRadius, ...innerColor);
+  }
+
+  const indexData = new Uint32Array(numSubdivisions * 6);
+  let ndx = 0;
+  for (let i = 0; i < numSubdivisions; ++i) {
+    const ndxOffset = i * 2;
+
+    // first triangle
+    indexData[ndx++] = ndxOffset;
+    indexData[ndx++] = ndxOffset + 1;
+    indexData[ndx++] = ndxOffset + 2;
 
     // second triangle
-    addVertex(c1 * innerRadius, s1 * innerRadius, ...innerColor);
-    addVertex(c2 * radius, s2 * radius, ...outerColor);
-    addVertex(c2 * innerRadius, s2 * innerRadius, ...innerColor);
+    indexData[ndx++] = ndxOffset + 2;
+    indexData[ndx++] = ndxOffset + 1;
+    indexData[ndx++] = ndxOffset + 3;
   }
 
   return {
     vertexData,
-    numVertices,
+    indexData,
+    numVertices: indexData.length,
   };
 }
 
