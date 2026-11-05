@@ -50,7 +50,7 @@ function main(device: GPUDevice) {
         @location(1) color: vec4f,
         @location(2) offset: vec2f,
         @location(3) scale: vec2f,
-        @location(4) perVertexColor: vec3f,
+        @location(4) perVertexColor: vec4f,
       };
       
       struct VSOutput {
@@ -66,7 +66,7 @@ function main(device: GPUDevice) {
         var vsOut: VSOutput;
         vsOut.position = 
             vec4f(vert.position * vert.scale + vert.offset, 0.0, 1.0);
-        vsOut.color = vert.color * vec4f(vert.perVertexColor, 1);
+        vsOut.color = vert.color * vert.perVertexColor;
         
         return vsOut;
       }
@@ -78,27 +78,28 @@ function main(device: GPUDevice) {
   });
 
   const pipeline = device.createRenderPipeline({
+    label: 'per vertex color',
     layout: 'auto',
     vertex: {
       module: module,
       buffers: [
         {
-          arrayStride: 5 * 4, // 5 floats, 4 bytes each,
+          arrayStride: 2 * 4 + 4, // 2 floats, 4 bytes each + 4 bytes
           attributes: [
             { shaderLocation: 0, offset: 0, format: 'float32x2' }, // position
-            { shaderLocation: 4, offset: 8, format: 'float32x3' }, // perVertexColor
+            { shaderLocation: 4, offset: 8, format: 'unorm8x4' }, // perVertexColor
           ],
         },
         {
-          arrayStride: 6 * 4,
+          arrayStride: 4 + 4 * 2, // 4 bytes + 2 floats, 4 bytes each
           stepMode: 'instance',
           attributes: [
             {
               shaderLocation: 1,
               offset: 0,
-              format: 'float32x4',
+              format: 'unorm8x4',
             }, // color
-            { shaderLocation: 2, offset: 16, format: 'float32x2' }, // offset
+            { shaderLocation: 2, offset: 4, format: 'float32x2' }, // offset
           ],
         },
         {
@@ -131,8 +132,8 @@ function main(device: GPUDevice) {
   }> = [];
 
   // create 2 vertex buffers
-  const staticUnitSize = 4 * 4 + 2 * 4; // color, scale (no padding needed on vertex shaders)
-  const changingUnitSize = 2 * 4; // scale
+  const staticUnitSize = 4 + 2 * 4; // color is 4 bytes, offset (no padding needed on vertex shaders)
+  const changingUnitSize = 2 * 4; // scale is 2 32-bit floats (4 bytes each)
   const staticVertexBufferSize = staticUnitSize * kNumbObjects;
   const changingVertexBufferSize = changingUnitSize * kNumbObjects;
 
@@ -148,28 +149,32 @@ function main(device: GPUDevice) {
   });
 
   const kColorOffset = 0;
-  const kOffsetOffset = 4;
+  const kOffsetOffset = 1;
 
   const kScaleOffset = 0;
 
   {
-    const staticStorageValues = new Float32Array(staticVertexBufferSize / 4);
-    for (let i = 0; i < kNumbObjects; i++) {
-      const staticOffset = i * (staticUnitSize / 4);
+    const staticVertexValuesU8 = new Uint8Array(staticVertexBufferSize);
+    const staticVertexValuesF32 = new Float32Array(staticVertexValuesU8.buffer);
+    for (let i = 0; i < kNumbObjects; ++i) {
+      const staticOffsetU8 = i * staticUnitSize;
+      const staticOffsetF32 = staticOffsetU8 / 4;
 
       // These are only set once now
-      staticStorageValues.set(
-        [rand(), rand(), rand(), 1],
-        staticOffset + kColorOffset,
+      staticVertexValuesU8.set(
+        // set the color
+        [rand() * 255, rand() * 255, rand() * 255, 255],
+        staticOffsetU8 + kColorOffset,
       );
-      staticStorageValues.set(
+      staticVertexValuesF32.set(
+        // set the offset
         [rand(-0.9, 0.9), rand(-0.9, 0.9)],
-        staticOffset + kOffsetOffset,
+        staticOffsetF32 + kOffsetOffset,
       );
 
       objectInfos.push({ scale: rand(0.2, 0.5) });
 
-      device.queue.writeBuffer(staticVertexBuffer, 0, staticStorageValues);
+      device.queue.writeBuffer(staticVertexBuffer, 0, staticVertexValuesF32);
     }
   }
 
@@ -361,19 +366,27 @@ function createCircleVertices({
   startAngle = 0,
   endAngle = Math.PI * 2,
 } = {}) {
-  // 2 triangles per subdivision, 3 verts per tri, 2 values (xy) each
+  // 2 triangles per subdivision, 3 verts per tri
   const numVertices = numSubdivisions * 3 * 2;
-  const vertexData = new Float32Array(numVertices * (2 + 3));
+
+  // 2 32-bit (4byte) values and 1 32-bit value for color (rgb_)
+  // The 32-bit color value will be written/read as 4 8-bit values
+  const vertexData = new Float32Array(numVertices * (2 + 1));
+  const colorData = new Uint8Array(vertexData.buffer);
 
   let offset = 0;
+  let colorOffset = 8;
 
   const addVertex = (x: number, y: number, ...rest: number[]) => {
     const [r, g, b] = rest;
     vertexData[offset++] = x;
     vertexData[offset++] = y;
-    vertexData[offset++] = r;
-    vertexData[offset++] = g;
-    vertexData[offset++] = b;
+
+    offset += 1; // skip the color
+    colorData[colorOffset++] = r * 255;
+    colorData[colorOffset++] = g * 255;
+    colorData[colorOffset++] = b * 255;
+    colorOffset += 9; // skip extra byte and the position
   };
   // 2 triangles per subdivision
   //
@@ -397,11 +410,8 @@ function createCircleVertices({
     const s2 = Math.sin(angle2);
 
     // first triangle
-    //@ts-ignore
     addVertex(c1 * radius, s1 * radius, ...outerColor);
-    //@ts-ignore
     addVertex(c2 * radius, s2 * radius, ...outerColor);
-    //@ts-ignore
     addVertex(c1 * innerRadius, s1 * innerRadius, ...innerColor);
 
     // second triangle
