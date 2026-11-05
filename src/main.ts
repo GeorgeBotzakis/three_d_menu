@@ -45,15 +45,12 @@ function main(device: GPUDevice) {
   const module = device.createShaderModule({
     label: 'triangle shaders with uniforms',
     code: /* wgsl */ `
-      struct OurStruct {
-        color: vec4f,
-        offset: vec2f,
-      };
-      struct OtherStruct {
-        scale: vec2f,
-      };
       struct Vertex {
-        position: vec2f,
+        @location(0) position: vec2f,
+        @location(1) color: vec4f,
+        @location(2) offset: vec2f,
+        @location(3) scale: vec2f,
+        @location(4) perVertexColor: vec3f,
       };
       
       struct VSOutput {
@@ -61,22 +58,15 @@ function main(device: GPUDevice) {
         @location(0) color: vec4f,
       };
       
-      @group(0) @binding(0) var<storage, read> ourStructs: array<OurStruct>;
-      @group(0) @binding(1) var<storage, read> otherStructs: array<OtherStruct>;
-      @group(0) @binding(2) var<storage, read> pos: array<Vertex>;
      
       @vertex fn vs(
-        @builtin(vertex_index) vertexIndex : u32,
-        @builtin(instance_index) instanceIndex: u32
+        vert: Vertex,
       ) -> VSOutput {
-        
-        let otherStruct = otherStructs[instanceIndex];
-        let ourStruct = ourStructs[instanceIndex];
         
         var vsOut: VSOutput;
         vsOut.position = 
-            vec4f(pos[vertexIndex].position * otherStruct.scale + ourStruct.offset, 0.0, 1.0);
-        vsOut.color = ourStruct.color;
+            vec4f(vert.position * vert.scale + vert.offset, 0.0, 1.0);
+        vsOut.color = vert.color * vec4f(vert.perVertexColor, 1);
         
         return vsOut;
       }
@@ -91,6 +81,32 @@ function main(device: GPUDevice) {
     layout: 'auto',
     vertex: {
       module: module,
+      buffers: [
+        {
+          arrayStride: 5 * 4, // 5 floats, 4 bytes each,
+          attributes: [
+            { shaderLocation: 0, offset: 0, format: 'float32x2' }, // position
+            { shaderLocation: 4, offset: 8, format: 'float32x3' }, // perVertexColor
+          ],
+        },
+        {
+          arrayStride: 6 * 4,
+          stepMode: 'instance',
+          attributes: [
+            {
+              shaderLocation: 1,
+              offset: 0,
+              format: 'float32x4',
+            }, // color
+            { shaderLocation: 2, offset: 16, format: 'float32x2' }, // offset
+          ],
+        },
+        {
+          arrayStride: 2 * 4, // 2 floats, 4 bytes each
+          stepMode: 'instance',
+          attributes: [{ shaderLocation: 3, offset: 0, format: 'float32x2' }], // scale
+        },
+      ],
     },
     fragment: {
       module: module,
@@ -114,20 +130,21 @@ function main(device: GPUDevice) {
     // bindGroup: GPUBindGroup;
   }> = [];
 
-  const staticUnitSize = 4 * 4 + 2 * 4 + 2 * 4; // color, scale, padding
+  // create 2 vertex buffers
+  const staticUnitSize = 4 * 4 + 2 * 4; // color, scale (no padding needed on vertex shaders)
   const changingUnitSize = 2 * 4; // scale
-  const staticStorageBufferSize = staticUnitSize * kNumbObjects;
-  const changingStorageBufferSize = changingUnitSize * kNumbObjects;
+  const staticVertexBufferSize = staticUnitSize * kNumbObjects;
+  const changingVertexBufferSize = changingUnitSize * kNumbObjects;
 
-  const staticStorageBuffer = device.createBuffer({
-    label: 'static storage for objects',
-    size: staticStorageBufferSize,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  const staticVertexBuffer = device.createBuffer({
+    label: 'static vertex for objects',
+    size: staticVertexBufferSize,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
-  const changingStorageBuffer = device.createBuffer({
-    label: 'chaning storage for objects',
-    size: changingStorageBufferSize,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  const changingVertexBuffer = device.createBuffer({
+    label: 'changing vertex for objects',
+    size: changingVertexBufferSize,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
 
   const kColorOffset = 0;
@@ -136,7 +153,7 @@ function main(device: GPUDevice) {
   const kScaleOffset = 0;
 
   {
-    const staticStorageValues = new Float32Array(staticStorageBufferSize / 4);
+    const staticStorageValues = new Float32Array(staticVertexBufferSize / 4);
     for (let i = 0; i < kNumbObjects; i++) {
       const staticOffset = i * (staticUnitSize / 4);
 
@@ -152,7 +169,7 @@ function main(device: GPUDevice) {
 
       objectInfos.push({ scale: rand(0.2, 0.5) });
 
-      device.queue.writeBuffer(staticStorageBuffer, 0, staticStorageValues);
+      device.queue.writeBuffer(staticVertexBuffer, 0, staticStorageValues);
     }
   }
 
@@ -162,25 +179,15 @@ function main(device: GPUDevice) {
     innerRadius: 0.25,
   });
 
-  const vertexStorageBuffer = device.createBuffer({
-    label: 'storage buffer vertices',
+  const vertexBuffer = device.createBuffer({
+    label: 'vertex buffer vertices',
     size: vertexData.byteLength,
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
-  device.queue.writeBuffer(vertexStorageBuffer, 0, vertexData);
+  device.queue.writeBuffer(vertexBuffer, 0, vertexData);
 
   // a typed array we can use to update the changingStorageBuffer
-  const storageValues = new Float32Array(changingStorageBufferSize / 4);
-
-  const bindGroup = device.createBindGroup({
-    label: `bind group for objects`,
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: staticStorageBuffer },
-      { binding: 1, resource: changingStorageBuffer },
-      { binding: 2, resource: vertexStorageBuffer },
-    ],
-  });
+  const storageValues = new Float32Array(changingVertexBufferSize / 4);
 
   const renderPassDescriptor: GPURenderPassDescriptor = {
     label: 'renderPassDescriptor',
@@ -208,6 +215,9 @@ function main(device: GPUDevice) {
       renderPassDescriptor as GPURenderPassDescriptor,
     );
     pass.setPipeline(pipeline);
+    pass.setVertexBuffer(0, vertexBuffer);
+    pass.setVertexBuffer(1, staticVertexBuffer);
+    pass.setVertexBuffer(2, changingVertexBuffer);
 
     // set uniform values in our JS side F32 Array
     const aspect = canvas.width / canvas.height;
@@ -216,9 +226,8 @@ function main(device: GPUDevice) {
       const offset = index * (changingUnitSize / 4);
       storageValues.set([scale / aspect, scale], offset + kScaleOffset);
     });
-    device.queue.writeBuffer(changingStorageBuffer, 0, storageValues);
+    device.queue.writeBuffer(changingVertexBuffer, 0, storageValues);
 
-    pass.setBindGroup(0, bindGroup);
     pass.draw(numVertices, kNumbObjects); // call our vertex shader 3 times for each instance
     pass.end();
 
@@ -354,13 +363,17 @@ function createCircleVertices({
 } = {}) {
   // 2 triangles per subdivision, 3 verts per tri, 2 values (xy) each
   const numVertices = numSubdivisions * 3 * 2;
-  const vertexData = new Float32Array(numSubdivisions * 2 * 3 * 2);
+  const vertexData = new Float32Array(numVertices * (2 + 3));
 
   let offset = 0;
 
-  const addVertex = (x: number, y: number) => {
+  const addVertex = (x: number, y: number, ...rest: number[]) => {
+    const [r, g, b] = rest;
     vertexData[offset++] = x;
     vertexData[offset++] = y;
+    vertexData[offset++] = r;
+    vertexData[offset++] = g;
+    vertexData[offset++] = b;
   };
   // 2 triangles per subdivision
   //
@@ -368,6 +381,9 @@ function createCircleVertices({
   // | / /|
   // |/ / |
   // 2 3--5
+
+  const innerColor = [1, 1, 1];
+  const outerColor = [0.1, 0.1, 0.1];
 
   for (let i = 0; i < numSubdivisions; i++) {
     const angle1 =
@@ -381,14 +397,17 @@ function createCircleVertices({
     const s2 = Math.sin(angle2);
 
     // first triangle
-    addVertex(c1 * radius, s1 * radius);
-    addVertex(c2 * radius, s2 * radius);
-    addVertex(c1 * innerRadius, s1 * innerRadius);
+    //@ts-ignore
+    addVertex(c1 * radius, s1 * radius, ...outerColor);
+    //@ts-ignore
+    addVertex(c2 * radius, s2 * radius, ...outerColor);
+    //@ts-ignore
+    addVertex(c1 * innerRadius, s1 * innerRadius, ...innerColor);
 
     // second triangle
-    addVertex(c1 * innerRadius, s1 * innerRadius);
-    addVertex(c2 * radius, s2 * radius);
-    addVertex(c2 * innerRadius, s2 * innerRadius);
+    addVertex(c1 * innerRadius, s1 * innerRadius, ...innerColor);
+    addVertex(c2 * radius, s2 * radius, ...outerColor);
+    addVertex(c2 * innerRadius, s2 * innerRadius, ...innerColor);
   }
 
   return {
