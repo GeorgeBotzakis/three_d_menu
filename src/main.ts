@@ -44,161 +44,96 @@ function main(device: GPUDevice) {
 
   const module = device.createShaderModule({
     label: 'triangle shaders with uniforms',
-    code: /* wgsl */ `
-      struct Vertex {
-        @location(0) position: vec2f,
-        @location(1) color: vec4f,
-        @location(2) offset: vec2f,
-        @location(3) scale: vec2f,
-        @location(4) perVertexColor: vec4f,
-      };
-      
+    code: /* language=WGSL */ `      
       struct VSOutput {
         @builtin(position) position: vec4f,
-        @location(0) color: vec4f,
+        @location(0) texcoord: vec2f,
       };
       
      
       @vertex fn vs(
-        vert: Vertex,
+        @builtin(vertex_index) vertexIndex: u32,
       ) -> VSOutput {
-        
-        var vsOut: VSOutput;
-        vsOut.position = 
-            vec4f(vert.position * vert.scale + vert.offset, 0.0, 1.0);
-        vsOut.color = vert.color * vert.perVertexColor;
-        
-        return vsOut;
+        let pos = array(
+          //1st triangle
+          vec2f( 0.0, 0.0 ), // center
+          vec2f( 1.0, 0.0 ), // right, center
+          vec2f( 0.0, 1.0 ), // center, top
+          
+          // 2nd triangle
+          vec2f( 0.0, 1.0 ), // center, top
+          vec2f( 1.0, 0.0 ), // right, center
+          vec2f( 1.0, 1.0 ), // right, top
+        );
+        var vsOutput: VSOutput;
+        let xy = pos[vertexIndex];
+        vsOutput.position = vec4f(xy, 0.0, 1.0);
+        vsOutput.texcoord = vec2f(xy.x, 1.0 - xy.y);
+        return vsOutput;
       }
       
-       @fragment fn fs(vsOut: VSOutput) -> @location(0) vec4f {
-        return vsOut.color;
+      @group(0) @binding(0) var ourSampler: sampler;
+      @group(0) @binding(1) var ourTexture: texture_2d<f32>;
+      
+       @fragment fn fs(fsInput: VSOutput) -> @location(0) vec4f {
+        return textureSample(ourTexture, ourSampler, fsInput.texcoord);
       }
     `,
   });
 
   const pipeline = device.createRenderPipeline({
-    label: 'per vertex color',
+    label: 'hardcoded textured quad pipeline',
     layout: 'auto',
     vertex: {
-      module: module,
-      buffers: [
-        {
-          arrayStride: 2 * 4 + 4, // 2 floats, 4 bytes each + 4 bytes
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: 'float32x2' }, // position
-            { shaderLocation: 4, offset: 8, format: 'unorm8x4' }, // perVertexColor
-          ],
-        },
-        {
-          arrayStride: 4 + 4 * 2, // 4 bytes + 2 floats, 4 bytes each
-          stepMode: 'instance',
-          attributes: [
-            {
-              shaderLocation: 1,
-              offset: 0,
-              format: 'unorm8x4',
-            }, // color
-            { shaderLocation: 2, offset: 4, format: 'float32x2' }, // offset
-          ],
-        },
-        {
-          arrayStride: 2 * 4, // 2 floats, 4 bytes each
-          stepMode: 'instance',
-          attributes: [{ shaderLocation: 3, offset: 0, format: 'float32x2' }], // scale
-        },
-      ],
+      module,
     },
     fragment: {
-      module: module,
-      targets: [
-        {
-          format: presentationFormat,
-        },
-      ],
-    },
-    primitive: {
-      topology: 'triangle-list',
+      module,
+      targets: [{ format: presentationFormat }],
     },
   });
 
-  // Memory layout stuff
-  const kNumbObjects = 100;
-  const objectInfos: Array<{
-    scale: number;
-    // uniformBuffer: GPUBuffer;
-    // uniformValues: Float32Array<ArrayBuffer>;
-    // bindGroup: GPUBindGroup;
-  }> = [];
+  // Texture data
+  const kTextureWidth = 5;
+  const kTextureHeight = 7;
+  const _ = [255, 0, 0, 255]; //red
+  const y = [255, 255, 0, 255]; //yellow
+  const b = [0, 0, 255, 255]; //red
+  // prettier-multiline-arrays-next-line-pattern: 5 5
+  const textureData = new Uint8Array(
+    [
+      b, _, _, _, _,
+      _, y, y, y, _,
+      _, y, _, _, _,
+      _, y, y, _, _,
+      _, y, _, _, _,
+      _, y, _, _, _,
+      _, _, _, _, _,
+    ].flat(),
+  );
 
-  // create 2 vertex buffers
-  const staticUnitSize = 4 + 2 * 4; // color is 4 bytes, offset (no padding needed on vertex shaders)
-  const changingUnitSize = 2 * 4; // scale is 2 32-bit floats (4 bytes each)
-  const staticVertexBufferSize = staticUnitSize * kNumbObjects;
-  const changingVertexBufferSize = changingUnitSize * kNumbObjects;
-
-  const staticVertexBuffer = device.createBuffer({
-    label: 'static vertex for objects',
-    size: staticVertexBufferSize,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-  });
-  const changingVertexBuffer = device.createBuffer({
-    label: 'changing vertex for objects',
-    size: changingVertexBufferSize,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-  });
-
-  const kColorOffset = 0;
-  const kOffsetOffset = 1;
-
-  const kScaleOffset = 0;
-
-  {
-    const staticVertexValuesU8 = new Uint8Array(staticVertexBufferSize);
-    const staticVertexValuesF32 = new Float32Array(staticVertexValuesU8.buffer);
-    for (let i = 0; i < kNumbObjects; ++i) {
-      const staticOffsetU8 = i * staticUnitSize;
-      const staticOffsetF32 = staticOffsetU8 / 4;
-
-      // These are only set once now
-      staticVertexValuesU8.set(
-        // set the color
-        [rand() * 255, rand() * 255, rand() * 255, 255],
-        staticOffsetU8 + kColorOffset,
-      );
-      staticVertexValuesF32.set(
-        // set the offset
-        [rand(-0.9, 0.9), rand(-0.9, 0.9)],
-        staticOffsetF32 + kOffsetOffset,
-      );
-
-      objectInfos.push({ scale: rand(0.2, 0.5) });
-
-      device.queue.writeBuffer(staticVertexBuffer, 0, staticVertexValuesF32);
-    }
-  }
-
-  // circle buffer
-  const { vertexData, indexData, numVertices } = createCircleVertices({
-    radius: 0.5,
-    innerRadius: 0.25,
+  const texture = device.createTexture({
+    size: [kTextureWidth, kTextureHeight],
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
 
-  const vertexBuffer = device.createBuffer({
-    label: 'vertex buffer',
-    size: vertexData.byteLength,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-  });
-  device.queue.writeBuffer(vertexBuffer, 0, vertexData);
-  const indexBuffer = device.createBuffer({
-    label: 'index buffer',
-    size: indexData.byteLength,
-    usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-  });
-  device.queue.writeBuffer(indexBuffer, 0, indexData);
+  device.queue.writeTexture(
+    { texture },
+    textureData,
+    { bytesPerRow: kTextureWidth * 4 },
+    { width: kTextureWidth, height: kTextureHeight },
+  );
 
-  // a typed array we can use to update the changingStorageBuffer
-  const storageValues = new Float32Array(changingVertexBufferSize / 4);
+  const sampler = device.createSampler();
+
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: sampler },
+      { binding: 1, resource: texture },
+    ],
+  });
 
   const renderPassDescriptor: GPURenderPassDescriptor = {
     label: 'renderPassDescriptor',
@@ -226,21 +161,9 @@ function main(device: GPUDevice) {
       renderPassDescriptor as GPURenderPassDescriptor,
     );
     pass.setPipeline(pipeline);
-    pass.setVertexBuffer(0, vertexBuffer);
-    pass.setVertexBuffer(1, staticVertexBuffer);
-    pass.setVertexBuffer(2, changingVertexBuffer);
-    pass.setIndexBuffer(indexBuffer, 'uint32');
+    pass.setBindGroup(0, bindGroup);
 
-    // set uniform values in our JS side F32 Array
-    const aspect = canvas.width / canvas.height;
-
-    objectInfos.forEach(({ scale }, index) => {
-      const offset = index * (changingUnitSize / 4);
-      storageValues.set([scale / aspect, scale], offset + kScaleOffset);
-    });
-    device.queue.writeBuffer(changingVertexBuffer, 0, storageValues);
-
-    pass.drawIndexed(numVertices, kNumbObjects);
+    pass.draw(6);
     pass.end();
 
     const commandBuffer = encoder.finish();
@@ -419,7 +342,14 @@ function createCircleVertices({
     addVertex(c1 * innerRadius, s1 * innerRadius, ...innerColor);
   }
 
-  const indexData = new Uint32Array(numSubdivisions * 6);
+  // 1st tri  2nd tri  3rd tri  4th tri
+  // 0 1 2    2 1 3    2 3 4    4 3 5
+  //
+  // 0--2        2     2--4        4  .....
+  // | /        /|     | /        /|
+  // |/        / |     |/        / |
+  // 1        1--3     3        3--5  .....
+  const indexData = new Uint16Array(numSubdivisions * 6);
   let ndx = 0;
   for (let i = 0; i < numSubdivisions; ++i) {
     const ndxOffset = i * 2;
